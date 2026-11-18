@@ -12,6 +12,7 @@ from commands import register_commands
 from downloads import register_downloads
 from callbacks import register_callbacks
 from recovery import run_recovery_loop
+from sync import register_sync_commands
 
 
 _app_instance = None
@@ -24,6 +25,7 @@ def iniciar_todus_bot():
         global _app_instance
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
+
         try:
             _app_instance = Client(
                 "todus_bot_session",
@@ -34,7 +36,9 @@ def iniciar_todus_bot():
                 sleep_threshold=5,
                 max_concurrent_transmissions=8,
             )
+
             register_commands(_app_instance)
+            register_sync_commands(_app_instance)
             register_downloads(_app_instance)
             register_callbacks(_app_instance)
 
@@ -42,17 +46,16 @@ def iniciar_todus_bot():
                 await _app_instance.start()
                 print("[OK] Bot de ToDus conectado y escuchando.")
 
-                # ♻️ Auto-recuperación: loop de fondo que revisa la nube
-                # y resube lo que falte desde la copia local.
+                # Conserva el proceso global configurado en config.ini.
                 asyncio.create_task(run_recovery_loop(_app_instance))
-                print("[OK] Loop de auto-recuperación iniciado.")
+                print("[OK] Loop global de recuperación iniciado.")
 
                 await asyncio.Event().wait()
 
             loop.run_until_complete(start_bot())
 
-        except Exception as e:
-            print(f"[ERROR] Fallo en el hilo del bot de ToDus: {e}")
+        except Exception as error:
+            print(f"[ERROR] Fallo en el hilo del bot de ToDus: {error}")
         finally:
             if _app_instance and _app_instance.is_connected:
                 try:
@@ -71,11 +74,13 @@ def iniciar_todus_bot():
 def detener_todus_bot():
     global _app_instance
     print("[DETENIENDO] Bot de ToDus S3...")
+
     if _app_instance is None:
         print("[WARN] No hay instancia activa que detener.")
         return
+
     try:
         _app_instance.stop()
         print("[OK] Bot de ToDus S3 detenido.")
-    except Exception as e:
-        print(f"[ERROR] Al detener el bot de ToDus: {e}")
+    except Exception as error:
+        print(f"[ERROR] Al detener el bot de ToDus: {error}")
