@@ -456,21 +456,30 @@ def delete_local_file(user_id: int, filename: str) -> bool:
     return False
 
 
-def clear_local_files() -> int:
-    """Borra TODOS los archivos locales. Devuelve cuántos eliminó."""
+def _clear_directory_files(directory: str) -> int:
+    """Elimina archivos y subdirectorios de `directory`, conservando la raíz."""
     count = 0
-    if os.path.isdir(LOCAL_DIR):
-        for entry in os.listdir(LOCAL_DIR):
-            p = os.path.join(LOCAL_DIR, entry)
-            try:
-                if os.path.isdir(p):
-                    count += len([f for f in os.listdir(p)
-                                  if os.path.isfile(os.path.join(p, f))])
-                    shutil.rmtree(p, ignore_errors=True)
-                else:
-                    os.remove(p)
-                    count += 1
-            except Exception:
-                pass
-    os.makedirs(LOCAL_DIR, exist_ok=True)
+    os.makedirs(directory, exist_ok=True)
+    for entry in os.listdir(directory):
+        path = os.path.join(directory, entry)
+        try:
+            if os.path.islink(path) or os.path.isfile(path):
+                os.remove(path)
+                count += 1
+            elif os.path.isdir(path):
+                count += sum(len(files) for _root, _dirs, files in os.walk(path))
+                shutil.rmtree(path)
+        except OSError:
+            # Continuar con el resto; solo cuenta lo que se eliminó.
+            continue
     return count
+
+
+def clear_local_files() -> int:
+    """Borra todos los archivos del almacenamiento local del bot."""
+    return _clear_directory_files(LOCAL_DIR)
+
+
+def clear_temp_files() -> int:
+    """Borra todos los archivos temporales (descargas/cargas en proceso)."""
+    return _clear_directory_files(TEMP_DIR)

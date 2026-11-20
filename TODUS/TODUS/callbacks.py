@@ -19,7 +19,7 @@ from config import (
     LOCAL_DIR, TEMP_DIR, is_admin, todus,
 )
 from db import (
-    delete_history_entry, delete_local_file, clear_local_files,
+    delete_history_entry, delete_local_file, clear_local_files, clear_temp_files,
     get_bot_stats, get_effective_quota, get_history_entry,
     get_history, get_plan_total_bytes, get_top_users, get_user_plan,
     get_user_quota, touch_user,
@@ -583,78 +583,118 @@ def register_callbacks(app):
 
                     async def _background_delete_all():
                         try:
-                            bot_prefix = _full_bot_prefix()
-
-                            all_keys = []
-                            for host in ("stickers", "stream"):
-                                client = todus._client_for(host)
-                                raw_files = await asyncio.wait_for(
-                                    _run_blocking(client.list, prefix=bot_prefix),
-                                    timeout=_TODUS_TIMEOUT) or []
-                                for f in raw_files:
-                                    k = f.get("Key")
-                                    if k and not k.endswith("/") and k.startswith(bot_prefix):
-                                        all_keys.append((host, k))
-
+                            bot_prefix = _full_bot_prefix().rstrip("/")
+                            prefix_dir = bot_prefix + "/"
                             deleted_count = 0
-                            total = len(all_keys)
+                            failed = set()
+                            rounds = 0
+                            max_rounds = 10
 
-                            BATCH = 10
-                            for i in range(0, total, BATCH):
-                                batch = all_keys[i:i + BATCH]
+                            # Volver a listar tras cada pasada: la lista puede estar
+                            # paginada/truncada y algunos borrados pueden fallar.
+                            while rounds < max_rounds:
+                                rounds += 1
+                                found = set()
+                                list_errors = []
+                                for host in ("stickers", "stream"):
+                                    client = todus._client_for(host)
+                                    try:
+                                        raw = await asyncio.wait_for(
+                                            _run_blocking(client.list, prefix=prefix_dir),
+                                            timeout=_TODUS_TIMEOUT)
+                                        if isinstance(raw, dict):
+                                            raw = raw.get("Contents") or raw.get("contents") or []
+                                        for item in raw or []:
+                                            key = item.get("Key") if isinstance(item, dict) else None
+                                            if key and key.startswith(prefix_dir) and not key.endswith("/"):
+                                                found.add((host, key))
+                                    except Exception as e:
+                                        list_errors.append(f"{host}: {e}")
 
-                                def _delete_batch(b=batch):
-                                    n = 0
-                                    for host, k in b:
-                                        try:
-                                            client = todus._client_for(host)
-                                            if client.delete(k):
-                                                n += 1
-                                        except Exception:
-                                            pass
-                                    return n
+                                if not found:
+                                    # No informar éxito si la nube no pudo listarse.
+                                    if list_errors:
+                                        raise RuntimeError("No se pudo listar la nube: " + "; ".join(list_errors))
+                                    break
+
+                                deleted_this_round = 0
+                                failed = set()
+                                for host, key in found:
+                                    try:
+                                        ok = await asyncio.wait_for(
+                                            _run_blocking(todus._client_for(host).delete, key),
+                                            timeout=_TODUS_TIMEOUT)
+                                    except Exception:
+                                        ok = False
+                                    if ok:
+                                        deleted_count += 1
+                                        deleted_this_round += 1
 
                                 try:
-                                    n_ok = await asyncio.wait_for(
-                                        _run_blocking(_delete_batch),
-                                        timeout=_TODUS_TIMEOUT)
-                                except asyncio.TimeoutError:
-                                    n_ok = 0
-                                deleted_count += n_ok
-
-                                try:
-                                    done = min(i + BATCH, total)
                                     await msg.edit_text(
-                                        f"🗑️ **Eliminando...**\n"
-                                        f"`{make_progress_bar(done * 100 / total if total else 100)}` "
-                                        f"{(done * 100 / total if total else 100):.0f}%\n"
-                                        f"✅ {deleted_count} / {total} eliminados")
+                                        f"🗑️ **Eliminando archivos...**\n"
+                                        f"Ronda {rounds}/{max_rounds}\n"
+                                        f"✅ Eliminados: {deleted_count}\n"
+                                        f"⚠️ Pendientes en esta ronda: {len(found) - deleted_this_round}")
                                 except Exception:
                                     pass
 
-                            # ── Borrar archivos locales ──
+                                if deleted_this_round == 0:
+                                    failed = found
+                                    break
+
+                            # Comprobación final para no reportar una limpieza completa
+                            # mientras queden objetos listables bajo el prefijo.
+                            remaining = set(failed)
+                            for host in ("stickers", "stream"):
+                                try:
+                                    raw = await asyncio.wait_for(
+                                        _run_blocking(todus._client_for(host).list, prefix=prefix_dir),
+                                        timeout=_TODUS_TIMEOUT)
+                                    if isinstance(raw, dict):
+                                        raw = raw.get("Contents") or raw.get("contents") or []
+                                    for item in raw or []:
+                                        key = item.get("Key") if isinstance(item, dict) else None
+                                        if key and key.startswith(prefix_dir) and not key.endswith("/"):
+                                            remaining.add((host, key))
+                                except Exception:
+                                    # La comprobación falló; conservar el aviso de pendientes.
+                                    remaining.add((host, "<no se pudo verificar el listado>"))
+
                             try:
                                 local_count = await _run_blocking(clear_local_files)
                             except Exception:
                                 local_count = 0
-
-                            # ── Limpiar historial (NO toca las cuotas) ──
-                            def _cleanup_all():
-                                conn = sqlite3.connect(DB_FILE)
-                                cur = conn.cursor()
-                                cur.execute("DELETE FROM history")
-                                conn.commit()
-                                conn.close()
-
-                            await _run_blocking(_cleanup_all)
-
                             try:
-                                await msg.edit_text(
-                                    f"✅ **Limpieza completada.**\n"
-                                    f"• Prefijo: `{bot_prefix}`\n"
-                                    f"• Archivos nube eliminados: {deleted_count}\n"
-                                    f"• Archivos locales eliminados: {local_count}\n"
-                                    f"• Historial borrado (las cuotas NO se reiniciaron).")
+                                temp_count = await _run_blocking(clear_temp_files)
+                            except Exception:
+                                temp_count = 0
+
+                            # Conservar historial como referencia si quedan objetos remotos.
+                            if not remaining:
+                                def _cleanup_all():
+                                    conn = sqlite3.connect(DB_FILE)
+                                    try:
+                                        conn.execute("DELETE FROM history")
+                                        conn.commit()
+                                    finally:
+                                        conn.close()
+                                await _run_blocking(_cleanup_all)
+
+                            texto = (
+                                f"✅ **Limpieza finalizada.**\n"
+                                f"• Prefijo: `{prefix_dir}`\n"
+                                f"• Archivos nube eliminados: {deleted_count}\n"
+                                f"• Archivos locales eliminados: {local_count}\n"
+                                f"• Temporales eliminados: {temp_count}\n")
+                            if remaining:
+                                texto += (
+                                    f"⚠️ Quedan {len(remaining)} archivo(s) o no se pudo verificar. "
+                                    "El historial se conservó; vuelve a intentar /delete_all.\n")
+                            else:
+                                texto += "• Historial borrado (las cuotas NO se reiniciaron)."
+                            try:
+                                await msg.edit_text(texto)
                             except Exception:
                                 pass
                         except Exception as e:
