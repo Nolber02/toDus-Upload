@@ -3,10 +3,11 @@ import asyncio
 
 from pyrogram import filters
 
-from recovery import SYNC_INTERVAL_SECONDS, run_user_recovery_loop
+from recovery import SYNC_INTERVAL_SECONDS, run_user_recovery_loop, start_user_sync_task
+from db import set_user_sync_enabled
 
 
-SYNC_TASKS = {}
+from recovery import SYNC_TASKS
 
 
 def register_sync_commands(app):
@@ -31,6 +32,7 @@ def register_sync_commands(app):
         opcion = args[0].strip().lower()
 
         if opcion in ("on", "activar", "1", "true"):
+            set_user_sync_enabled(user_id, True)
             current_task = SYNC_TASKS.get(user_id)
             if current_task is not None and not current_task.done():
                 await message.reply_text(
@@ -39,15 +41,7 @@ def register_sync_commands(app):
                 )
                 return
 
-            task = asyncio.create_task(
-                run_user_recovery_loop(client, user_id)
-            )
-            SYNC_TASKS[user_id] = task
-            task.add_done_callback(
-                lambda completed, uid=user_id:
-                    SYNC_TASKS.pop(uid, None)
-                    if SYNC_TASKS.get(uid) is completed else None
-            )
+            task = start_user_sync_task(client, user_id)
 
             await message.reply_text(
                 "✅ **Sincronización rápida activada.**\n"
@@ -58,6 +52,7 @@ def register_sync_commands(app):
             return
 
         if opcion in ("off", "desactivar", "0", "false"):
+            set_user_sync_enabled(user_id, False)
             task = SYNC_TASKS.pop(user_id, None)
             if task is None or task.done():
                 await message.reply_text(

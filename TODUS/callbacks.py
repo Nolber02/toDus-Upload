@@ -22,7 +22,7 @@ from db import (
     delete_history_entry, delete_local_file, clear_local_files, clear_temp_files,
     get_bot_stats, get_effective_quota, get_history_entry,
     get_history, get_plan_total_bytes, get_top_users, get_user_plan,
-    get_user_quota, touch_user,
+    get_user_quota, touch_user, get_history_entry_by_filename,
 )
 from state import (
     CALLBACK_REGISTRY, CANCEL_EVENTS, CONFIRM_REGISTRY, DOWNLOAD_PENDING,
@@ -376,15 +376,23 @@ def register_callbacks(app):
                 return
 
             try:
-                status = await callback.message.reply(
-                    f"🔄 **Resubiendo** `{filename}` **...**")
-            except Exception:
                 status = callback.message
+                await status.edit_text(f"🔄 **Resubiendo** `{filename}`...\n🔄 Resubidas: contando")
+            except Exception:
+                try:
+                    status = await callback.message.reply(
+                        f"🔄 **Resubiendo** `{filename}`...\n🔄 Resubidas: contando")
+                except Exception:
+                    status = callback.message
 
             try:
                 from upload import process_and_upload
                 proxy = _MsgProxy(callback.message, callback.from_user)
-                await process_and_upload(client, proxy, temp_path, filename, "resubir")
+                entry = get_history_entry_by_filename(user_id, filename)
+                await process_and_upload(
+                    client, proxy, temp_path, filename, "resubir",
+                    status_message=status,
+                    history_id=entry["id"] if entry else None)
             except Exception as e:
                 try:
                     await status.edit_text(f"❌ Error al resubir: {e}")

@@ -14,7 +14,7 @@ from config import DB_FILE, DAILY_QUOTA_BYTES, LOCAL_DIR, TEMP_DIR, is_admin
 def init_db():
     conn = sqlite3.connect(DB_FILE)
     cursor = conn.cursor()
-    cursor.execute("CREATE TABLE IF NOT EXISTS users (user_id INTEGER PRIMARY KEY, quota_used INTEGER DEFAULT 0, last_upload_date TEXT)")
+    cursor.execute("CREATE TABLE IF NOT EXISTS users (user_id INTEGER PRIMARY KEY, quota_used INTEGER DEFAULT 0, last_upload_date TEXT, sync_enabled INTEGER NOT NULL DEFAULT 1)")
     cursor.execute("CREATE TABLE IF NOT EXISTS history (id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER, file_name TEXT, file_size INTEGER, url TEXT, upload_date TEXT)")
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS plans (
@@ -39,6 +39,13 @@ def init_db():
             value TEXT
         )
     """)
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS recovery_notifications (
+            user_id INTEGER PRIMARY KEY,
+            message_id INTEGER NOT NULL,
+            count INTEGER NOT NULL DEFAULT 0
+        )
+    """)
     conn.commit()
 
     # ─── Migraciones users ───
@@ -48,6 +55,8 @@ def init_db():
         cursor.execute("ALTER TABLE users ADD COLUMN username TEXT")
     if "first_name" not in cols:
         cursor.execute("ALTER TABLE users ADD COLUMN first_name TEXT")
+    if "sync_enabled" not in cols:
+        cursor.execute("ALTER TABLE users ADD COLUMN sync_enabled INTEGER NOT NULL DEFAULT 1")
     conn.commit()
 
     # ─── Migraciones plans ───
@@ -62,6 +71,8 @@ def init_db():
     hcols = {row[1] for row in cursor.fetchall()}
     if "local_path" not in hcols:
         cursor.execute("ALTER TABLE history ADD COLUMN local_path TEXT")
+    if "resupload_count" not in hcols:
+        cursor.execute("ALTER TABLE history ADD COLUMN resupload_count INTEGER NOT NULL DEFAULT 0")
     conn.commit()
 
     _check_weekly_reset(conn)
@@ -339,6 +350,71 @@ def add_history(user_id: int, file_name: str, file_size: int, url: str,
     return last_id
 
 
+def get_user_file_count(user_id: int) -> int:
+    conn = sqlite3.connect(DB_FILE)
+    try:
+        row = conn.execute(
+            "SELECT COUNT(*) FROM history WHERE user_id = ?", (user_id,)
+        ).fetchone()
+        return row[0] if row else 0
+    finally:
+        conn.close()
+
+
+def set_user_sync_enabled(user_id: int, enabled: bool):
+    touch_user(user_id)
+    conn = sqlite3.connect(DB_FILE)
+    try:
+        conn.execute(
+            "UPDATE users SET sync_enabled = ? WHERE user_id = ?",
+            (1 if enabled else 0, user_id))
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def is_sync_enabled(user_id: int) -> bool:
+    conn = sqlite3.connect(DB_FILE)
+    try:
+        row = conn.execute(
+            "SELECT sync_enabled FROM users WHERE user_id = ?", (user_id,)
+        ).fetchone()
+        return bool(row and row[0])
+    finally:
+        conn.close()
+
+
+def get_sync_enabled_user_ids() -> list:
+    conn = sqlite3.connect(DB_FILE)
+    try:
+        return [row[0] for row in conn.execute(
+            "SELECT user_id FROM users WHERE sync_enabled = 1").fetchall()]
+    finally:
+        conn.close()
+
+
+def get_recovery_notification(user_id: int):
+    conn = sqlite3.connect(DB_FILE)
+    try:
+        return conn.execute(
+            "SELECT message_id, count FROM recovery_notifications WHERE user_id = ?",
+            (user_id,)).fetchone()
+    finally:
+        conn.close()
+
+
+def save_recovery_notification(user_id: int, message_id: int, count: int):
+    conn = sqlite3.connect(DB_FILE)
+    try:
+        conn.execute(
+            "INSERT INTO recovery_notifications (user_id, message_id, count) VALUES (?, ?, ?) "
+            "ON CONFLICT(user_id) DO UPDATE SET message_id = excluded.message_id, count = excluded.count",
+            (user_id, message_id, count))
+        conn.commit()
+    finally:
+        conn.close()
+
+
 def get_history(user_id: int, search_query: str = None) -> list:
     conn = sqlite3.connect(DB_FILE)
     cursor = conn.cursor()
@@ -367,6 +443,87 @@ def get_history_entries(user_id: int, limit: int = 20) -> list:
     rows = cursor.fetchall()
     conn.close()
     return rows
+
+
+def add_resupload_history(user_id: int, file_name: str, file_size: int, url: str,
+                          s3_filename: str = None, history_id: int = None) -> int:
+    """Actualiza la entrada existente al resubir, conservando su identidad."""
+    s3_name = s3_filename or file_name
+    local_dir = os.path.join(LOCAL_DIR, f"u{user_id}")
+    os.makedirs(local_dir, exist_ok=True)
+    local_path = os.path.join(local_dir, s3_name)
+    for temp_name in (file_name, s3_name):
+        temp_path = os.path.join(TEMP_DIR, f"u{user_id}", temp_name)
+        if os.path.exists(temp_path):
+            try:
+                shutil.copy2(temp_path, local_path)
+                break
+            except Exception:
+                pass
+
+    conn = sqlite3.connect(DB_FILE)
+    try:
+        cur = conn.cursor()
+        if history_id is not None:
+            cur.execute("SELECT id FROM history WHERE id = ? AND user_id = ?",
+                        (history_id, user_id))
+            row = cur.fetchone()
+        else:
+            cur.execute(
+                "SELECT id FROM history WHERE user_id = ? AND "
+                "(file_name = ? OR url LIKE ?) ORDER BY id DESC LIMIT 1",
+                (user_id, file_name, f"%/{s3_name}"))
+            row = cur.fetchone()
+        if row:
+            cur.execute(
+                "UPDATE history SET file_name = ?, file_size = ?, url = ?, "
+                "upload_date = ?, local_path = ?, resupload_count = resupload_count + 1 "
+                "WHERE id = ?",
+                (file_name, file_size, url,
+                 datetime.now().strftime("%Y-%m-%d %H:%M"),
+                 local_path if os.path.exists(local_path) else None, row[0]))
+            history_id = row[0]
+        else:
+            cur.execute(
+                "INSERT INTO history (user_id, file_name, file_size, url, upload_date, local_path, resupload_count) "
+                "VALUES (?, ?, ?, ?, ?, ?, 1)",
+                (user_id, file_name, file_size, url,
+                 datetime.now().strftime("%Y-%m-%d %H:%M"),
+                 local_path if os.path.exists(local_path) else None))
+            history_id = cur.lastrowid
+        conn.commit()
+        return history_id
+    finally:
+        conn.close()
+
+
+def get_history_resupload_count(user_id: int, s3_filename: str) -> int:
+    conn = sqlite3.connect(DB_FILE)
+    try:
+        row = conn.execute(
+            "SELECT resupload_count FROM history WHERE user_id = ? AND url LIKE ? "
+            "ORDER BY id DESC LIMIT 1", (user_id, f"%/{s3_filename}")
+        ).fetchone()
+        return row[0] if row else 0
+    finally:
+        conn.close()
+
+
+def get_history_entry_by_filename(user_id: int, filename: str) -> Optional[dict]:
+    conn = sqlite3.connect(DB_FILE)
+    try:
+        row = conn.execute(
+            "SELECT id, user_id, file_name, file_size, url, upload_date, local_path "
+            "FROM history WHERE user_id = ? AND "
+            "(file_name = ? OR url LIKE ?) ORDER BY id DESC LIMIT 1",
+            (user_id, filename, f"%/{filename}")).fetchone()
+    finally:
+        conn.close()
+    if not row:
+        return None
+    return {"id": row[0], "user_id": row[1], "file_name": row[2],
+            "file_size": row[3], "url": row[4], "upload_date": row[5],
+            "local_path": row[6]}
 
 
 def get_history_entry(history_id: int) -> Optional[dict]:

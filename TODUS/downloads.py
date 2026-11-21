@@ -132,6 +132,8 @@ def register_downloads(app):
     async def receive_file(client, message: Message):
         user = message.from_user
         touch_user(user.id, user.username, user.first_name)
+        from recovery import start_user_sync_task
+        start_user_sync_task(client, user.id)
 
         import config as cfgmod
         if cfgmod.is_maintenance() and not is_admin(user.id):
@@ -272,6 +274,8 @@ def register_downloads(app):
     async def text_handler(client, message: Message):
         user_id = message.from_user.id
         touch_user(user_id, message.from_user.username, message.from_user.first_name)
+        from recovery import start_user_sync_task
+        start_user_sync_task(client, user_id)
 
         import config as cfgmod
         if cfgmod.is_maintenance() and not is_admin(user_id):

@@ -169,9 +169,13 @@ class ToDusHelper:
                     client.delete(key)
                 except Exception:
                     pass
+                if remote_size < size:
+                    error = (f"Tamaño remoto ({remote_size}) menor que el original "
+                             f"({size}). Subida incompleta.")
+                else:
+                    error = f"Tamaño remoto ({remote_size}) != local ({size}). Subida interrumpida."
                 return UploadResult(
-                    success=False, key=key, size=size,
-                    error=f"Tamaño remoto ({remote_size}) != local ({size}). Subida interrumpida.")
+                    success=False, key=key, size=size, error=error)
         except Exception as e:
             log.warning(f"No se pudo verificar tamaño remoto de {key}: {e}")
 

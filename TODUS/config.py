@@ -104,4 +104,4 @@ INSTAGRAM_HEADERS  = {**DEFAULT_HEADERS, "Referer": "https://www.instagram.com/"
 YOUTUBE_HEADERS    = {**DEFAULT_HEADERS, "Referer": "https://www.youtube.com/"}
 MEGA_HEADERS       = {**DEFAULT_HEADERS, "Referer": "https://mega.nz/"}
 
-USE_DESCRIPTION = False
+USE_DESCRIPTION = True

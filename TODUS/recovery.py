@@ -13,6 +13,7 @@ from config import (
     todus,
 )
 from utils import _run_blocking
+from db import get_recovery_notification, save_recovery_notification
 
 
 # Intervalo de la comprobación rápida activada por /sync.
@@ -196,11 +197,13 @@ async def _recover_entry_locked(
             temp_path,
             s3_name,
             "auto-recovery",
+            history_id=history_id,
+            host_override=host,
         )
 
-        # process_and_upload guarda el registro nuevo. Quitar el antiguo
-        # evita duplicar la entrada del archivo en el historial.
-        _delete_history_by_id(history_id)
+        # Solo confirmar y notificar si el objeto quedó disponible en la nube.
+        if not await _key_exists(user_id, s3_name, host=host):
+            return False
         print(f"[RECOVERY] ✅ Recuperado: {file_name} (uid={user_id})")
         return True
     except Exception as error:
@@ -240,8 +243,56 @@ async def _recover_entry(
                 _RECOVERY_LOCKS.pop(history_id, None)
 
 
+async def _notify_recovery(client, user_id: int, file_name: str):
+    previous = get_recovery_notification(user_id)
+    count = (previous[1] if previous else 0) + 1
+    text = (f"♻️ **Archivo recuperado**\n📄 `{file_name}`\n"
+            f"🔄 **Recuperaciones automáticas:** {count}\n"
+            "El archivo faltaba en la nube y se resubió desde la copia local.")
+
+    if previous:
+        try:
+            message = await client.get_messages(user_id, previous[0])
+            if message and not getattr(message, "empty", False):
+                await message.edit_text(text)
+                save_recovery_notification(user_id, previous[0], count)
+                return
+        except Exception:
+            pass
+
+    message = await client.send_message(user_id, text)
+    save_recovery_notification(user_id, message.id, count)
+
+
+def start_user_sync_task(client, user_id: int):
+    from db import is_sync_enabled
+    if not is_sync_enabled(user_id):
+        return None
+    task = SYNC_TASKS.get(user_id)
+    if task is None or task.done():
+        task = asyncio.create_task(run_user_recovery_loop(client, user_id))
+        SYNC_TASKS[user_id] = task
+        task.add_done_callback(
+            lambda completed, uid=user_id:
+                SYNC_TASKS.pop(uid, None)
+                if SYNC_TASKS.get(uid) is completed else None
+        )
+    return task
+
+
+async def start_default_sync_tasks(client):
+    """Inicia /sync para los usuarios habilitados al arrancar el bot."""
+    from db import get_sync_enabled_user_ids
+    for user_id in get_sync_enabled_user_ids():
+        start_user_sync_task(client, user_id)
+
+
+SYNC_TASKS = {}
+
+
 async def run_user_recovery_loop(client, user_id: int):
     """Comprueba cada 10 segundos solo los archivos del usuario que activó /sync."""
+    from db import is_sync_enabled
     print(
         f"[SYNC] Loop iniciado para uid={user_id} "
         f"(cada {SYNC_INTERVAL_SECONDS}s)"
@@ -249,6 +300,8 @@ async def run_user_recovery_loop(client, user_id: int):
 
     while True:
         try:
+            if not is_sync_enabled(user_id):
+                return
             entries = _get_history_entries_with_local()
 
             for history_id, entry_user_id, file_name, url, local_path in entries:
@@ -266,13 +319,7 @@ async def run_user_recovery_loop(client, user_id: int):
                     )
                     if recovered:
                         try:
-                            await client.send_message(
-                                user_id,
-                                "♻️ **Archivo recuperado**\n"
-                                f"📄 `{file_name}`\n"
-                                "El archivo faltaba en la nube y se resubió "
-                                "desde la copia local."
-                            )
+                            await _notify_recovery(client, user_id, file_name)
                         except Exception:
                             pass
                 except asyncio.CancelledError:
@@ -316,6 +363,10 @@ async def run_recovery_loop(client):
                         local_path,
                     ):
                         recovered += 1
+                        try:
+                            await _notify_recovery(client, user_id, file_name)
+                        except Exception as error:
+                            print(f"[RECOVERY] No se pudo notificar uid={user_id}: {error}")
                         await asyncio.sleep(3)
                 except asyncio.CancelledError:
                     raise
@@ -328,11 +379,9 @@ async def run_recovery_loop(client):
                     f"{recovered} archivo(s) recuperado(s)"
                 )
                 try:
-                    await client.send_message(
-                        ADMIN_ID,
-                        "♻️ **Auto-recuperación global**\n"
-                        f"Se resubieron {recovered} archivo(s) que faltaban."
-                    )
+                    await _notify_recovery(
+                        client, ADMIN_ID,
+                        f"{recovered} archivo(s) recuperado(s)")
                 except Exception:
                     pass
         except asyncio.CancelledError:

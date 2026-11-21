@@ -11,7 +11,7 @@ from config import API_ID, API_HASH, BOT_TOKEN
 from commands import register_commands
 from downloads import register_downloads
 from callbacks import register_callbacks
-from recovery import run_recovery_loop
+from recovery import run_recovery_loop, start_default_sync_tasks
 from sync import register_sync_commands
 
 
@@ -48,7 +48,8 @@ def iniciar_todus_bot():
 
                 # Conserva el proceso global configurado en config.ini.
                 asyncio.create_task(run_recovery_loop(_app_instance))
-                print("[OK] Loop global de recuperación iniciado.")
+                await start_default_sync_tasks(_app_instance)
+                print("[OK] Loop global y sincronización predeterminada iniciados.")
 
                 await asyncio.Event().wait()
 

@@ -57,6 +57,8 @@ def register_commands(app):
     @app.on_message(filters.command("start"))
     async def start_cmd(client, message: Message):
         touch_user(message.from_user.id, message.from_user.username, message.from_user.first_name)
+        from recovery import start_user_sync_task
+        start_user_sync_task(client, message.from_user.id)
         uid = message.from_user.id
 
         import config as cfgmod
