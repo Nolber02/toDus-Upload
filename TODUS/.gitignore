@@ -1,7 +1,0 @@
-.env
-users.db
-todus_bot_session.session
-todus_bot_session.session-journal
-__pycache__
-temp_downloads
-.gitignore
