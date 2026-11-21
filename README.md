@@ -28,6 +28,7 @@ Bot de Telegram para **subir, gestionar y compartir archivos** en la nube de **T
 - ❌ **Cancelación** de tareas en curso.
 
 ### 👑 Para administradores
+
 - 🌐 Cambio dinámico de **endpoint** (`/host stream|stickers`).
 - 💳 Asignación de **planes** de cuota (`/plan`).
 - 📢 **Mensajes masivos** (`/msg`) con confirmación y estadísticas.
@@ -37,6 +38,7 @@ Bot de Telegram para **subir, gestionar y compartir archivos** en la nube de **T
 - 🧾 Generación de **`.txt` con todos los enlaces** (`/list_txt`).
 - 🗑️ **Eliminación masiva** de archivos del bot (`/delete_all`).
 - ♻️ **Recuperación** de archivos eliminados de la nube (`/recover`).
+- ♻️ **Recuperación** de archivos eliminados de la nube automaticamente cada 10s (`/sync on`).
 - 🚧 **Modo mantenimiento** (`/mantenimiento on|off`).
 - ⚙️ Alternar nombre desde **descripción/caption** (`/usedescription on|off`).
 
