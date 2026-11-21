@@ -1,9 +1,9 @@
 name: Ejecutar Bot ToDus
 
 on:
-  schedule:
+  #schedule:
     # Se ejecuta cada 5 horas y 45 minutos para evitar cortes
-    - cron: '45 */5 * * *'
+    #- cron: '45 */5 * * *'
   workflow_dispatch:
 
 # Esto asegura que si hay dos ejecuciones a la vez, GitHub cancele la vieja y deje la nueva
